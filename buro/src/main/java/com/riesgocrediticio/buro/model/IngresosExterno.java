@@ -11,11 +11,6 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.Objects;
 
-/**
- * Clase de modelo para la tabla 'buro_externo.ingresos'.
- * Mapea la estructura de la tabla de la base de datos a un objeto Java.
- * Sigue la convención de nombres de columnas en snake_case.
- */
 @Entity
 @Table(name = "ingresos", schema = "buro_externo")
 public class IngresosExterno {
