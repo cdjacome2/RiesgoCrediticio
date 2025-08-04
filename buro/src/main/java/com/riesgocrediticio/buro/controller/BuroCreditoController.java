@@ -11,10 +11,9 @@ import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.tags.Tag;
-
 import jakarta.validation.constraints.NotBlank;
-
 import lombok.extern.slf4j.Slf4j;
+
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.annotation.Validated;
@@ -64,5 +63,39 @@ public class BuroCreditoController {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
     }
+    
+    @Operation(
+        summary = "Sincroniza todos los clientes tipo PERSONA desde el core al buró interno",
+        description = "Carga masiva de clientes del core. Devuelve un mensaje con el total de registros creados."
+    )
+    @ApiResponses({
+        @ApiResponse(responseCode = "200", description = "Sincronización exitosa",
+            content = @Content(schema = @Schema(implementation = String.class))),
+        @ApiResponse(responseCode = "500", description = "Error interno")
+    })
+    @PostMapping("/sincronizar-core")
+    public ResponseEntity<String> sincronizarDesdeCore() {
+        log.info("Solicitud recibida → Sincronización masiva desde el core");
+        int creados = buroCreditoService.sincronizarClientesDesdeCore();
+        String mensaje = "Se guardaron " + creados + " clientes del buró interno";
+        log.info("Sincronización finalizada: {}", mensaje);
+        return ResponseEntity.ok(mensaje);
+    }
 
+    @Operation(
+        summary = "Cuenta el número de clientes PERSONA en el core",
+        description = "Retorna el total de registros de clientes tipo PERSONA existentes en el microservicio core."
+    )
+    @ApiResponses({
+        @ApiResponse(responseCode = "200", description = "Conteo exitoso",
+            content = @Content(schema = @Schema(implementation = Integer.class))),
+        @ApiResponse(responseCode = "500", description = "Error interno")
+    })
+    @GetMapping("/count-core-personas")
+    public ResponseEntity<Integer> contarPersonasCore() {
+        log.info("Solicitud recibida → Conteo de clientes tipo PERSONA en el core");
+        int total = buroCreditoService.contarPersonasEnCore();
+        log.info("Total de personas tipo PERSONA en core: {}", total);
+        return ResponseEntity.ok(total);
+    }
 }

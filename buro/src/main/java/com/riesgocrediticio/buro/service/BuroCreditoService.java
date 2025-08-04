@@ -5,12 +5,15 @@ import com.riesgocrediticio.buro.dto.ClienteDto;
 import com.riesgocrediticio.buro.dto.response.ConsultaBuroCreditoResponse;
 import com.riesgocrediticio.buro.enums.MoraEnum;
 import com.riesgocrediticio.buro.enums.MoraTresMesesEnum;
-import com.riesgocrediticio.buro.enums.ProductoExternoEnum;
 import com.riesgocrediticio.buro.enums.ProductoInternoEnum;
 import com.riesgocrediticio.buro.exception.ClienteNoEncontradoException;
-import com.riesgocrediticio.buro.mapper.*;
-import com.riesgocrediticio.buro.model.*;
-import com.riesgocrediticio.buro.repository.*;
+import com.riesgocrediticio.buro.mapper.EgresosInternoMapper;
+import com.riesgocrediticio.buro.mapper.IngresosInternoMapper;
+import com.riesgocrediticio.buro.model.EgresosInterno;
+import com.riesgocrediticio.buro.model.IngresosInterno;
+import com.riesgocrediticio.buro.repository.EgresosInternoRepository;
+import com.riesgocrediticio.buro.repository.IngresosInternoRepository;
+
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -25,206 +28,161 @@ public class BuroCreditoService {
     private final ClienteBuroClient clienteBuroClient;
     private final IngresosInternoRepository ingresosInternoRepository;
     private final EgresosInternoRepository egresosInternoRepository;
-    private final IngresosExternoRepository ingresosExternoRepository;
-    private final EgresosExternoRepository egresosExternoRepository;
     private final IngresosInternoMapper ingresosInternoMapper;
     private final EgresosInternoMapper egresosInternoMapper;
-    private final IngresosExternoMapper ingresosExternoMapper;
-    private final EgresosExternoMapper egresosExternoMapper;
 
     public BuroCreditoService(
             ClienteBuroClient clienteBuroClient,
             IngresosInternoRepository ingresosInternoRepository,
             EgresosInternoRepository egresosInternoRepository,
-            IngresosExternoRepository ingresosExternoRepository,
-            EgresosExternoRepository egresosExternoRepository,
             IngresosInternoMapper ingresosInternoMapper,
-            EgresosInternoMapper egresosInternoMapper,
-            IngresosExternoMapper ingresosExternoMapper,
-            EgresosExternoMapper egresosExternoMapper
+            EgresosInternoMapper egresosInternoMapper
     ) {
         this.clienteBuroClient = clienteBuroClient;
         this.ingresosInternoRepository = ingresosInternoRepository;
         this.egresosInternoRepository = egresosInternoRepository;
-        this.ingresosExternoRepository = ingresosExternoRepository;
-        this.egresosExternoRepository = egresosExternoRepository;
         this.ingresosInternoMapper = ingresosInternoMapper;
         this.egresosInternoMapper = egresosInternoMapper;
-        this.ingresosExternoMapper = ingresosExternoMapper;
-        this.egresosExternoMapper = egresosExternoMapper;
+    }
+
+    @Transactional(readOnly = true)
+    public ConsultaBuroCreditoResponse consultarPorCedula(String cedula) {
+        try {
+            log.debug("Iniciando consulta de buró interno para cédula: {}", cedula);
+
+            List<IngresosInterno> ingresosInternos = ingresosInternoRepository.findAllByCedulaCliente(cedula);
+            List<EgresosInterno> egresosInternos = egresosInternoRepository.findAllByCedulaCliente(cedula);
+
+            boolean hayDatos = !ingresosInternos.isEmpty() || !egresosInternos.isEmpty();
+
+            if (!hayDatos) {
+                log.warn("No se encontró información en el buró interno para cédula={}", cedula);
+                throw new ClienteNoEncontradoException("El cliente no está registrado en el buró interno.");
+            }
+
+            String nombre = ingresosInternos.stream().findFirst().map(IngresosInterno::getNombres)
+                    .orElse(egresosInternos.stream().findFirst().map(EgresosInterno::getNombres)
+                    .orElse(null));
+
+            log.info("Consulta exitosa de buró interno para cédula={}", cedula);
+
+            return ConsultaBuroCreditoResponse.builder()
+                    .nombreCliente(nombre)
+                    .cedulaCliente(cedula)
+                    .ingresosInternos(ingresosInternoMapper.toDtoList(ingresosInternos))
+                    .egresosInternos(egresosInternoMapper.toDtoList(egresosInternos))
+                    .ingresosExternos(Collections.emptyList())
+                    .egresosExternos(Collections.emptyList())
+                    .build();
+        } catch (ClienteNoEncontradoException ex) {
+            log.warn("Cliente no encontrado: {}", ex.getMessage());
+            throw ex;
+        } catch (Exception ex) {
+            log.error("Error inesperado al consultar buró interno para cédula={}: {}", cedula, ex.getMessage(), ex);
+            throw ex;
+        }
     }
 
     @Transactional
-    public ConsultaBuroCreditoResponse consultarPorCedula(String cedula) {
-        log.info("Iniciando consulta de buró de crédito para cédula {}", cedula);
+    public int sincronizarClientesDesdeCore() {
+        log.info("Iniciando sincronización masiva de clientes PERSONA desde el core...");
+        int creados = 0;
+        Random random = new Random();
 
         try {
-            // 1. Obtener cliente PERSONA del core
-            log.debug("Consultando cliente en microservicio core");
             List<ClienteDto> personas = clienteBuroClient.listarPorTipoEntidad("PERSONA");
-            ClienteDto cliente = personas.stream()
-                    .filter(p -> p.getNumeroIdentificacion().equals(cedula))
-                    .findFirst()
-                    .orElseThrow(() -> {
-                        log.warn("Cliente no encontrado en core con cédula {}", cedula);
-                        return new ClienteNoEncontradoException("Cliente no encontrado con cédula: " + cedula);
-                    });
 
-            // 2. Buscar y/o poblar ingresos y egresos internos
-            List<IngresosInterno> ingresosInternos;
-            try {
-                ingresosInternos = ingresosInternoRepository.findAllByCedulaCliente(cedula);
-                if (ingresosInternos.isEmpty()) {
-                    log.info("No existen ingresos internos para {}, generando mock y guardando...", cedula);
-                    ingresosInternos = mockIngresosInternos(cedula, cliente.getNombre());
-                    ingresosInternos = ingresosInternoRepository.saveAll(ingresosInternos);
+            for (ClienteDto cliente : personas) {
+                String cedula = cliente.getNumeroIdentificacion();
+                String nombre = cliente.getNombre();
+
+                if (ingresosInternoRepository.findAllByCedulaCliente(cedula).isEmpty()) {
+                    ingresosInternoRepository.saveAll(mockIngresosInternos(cedula, nombre, random));
+                    creados++;
                 }
-            } catch (Exception e) {
-                log.error("Error accediendo a ingresos internos: {}", e.getMessage(), e);
-                throw e;
-            }
-
-            List<EgresosInterno> egresosInternos;
-            try {
-                egresosInternos = egresosInternoRepository.findAllByCedulaCliente(cedula);
-                if (egresosInternos.isEmpty()) {
-                    log.info("No existen egresos internos para {}, generando mock y guardando...", cedula);
-                    egresosInternos = mockEgresosInternos(cedula, cliente.getNombre());
-                    egresosInternos = egresosInternoRepository.saveAll(egresosInternos);
+                if (egresosInternoRepository.findAllByCedulaCliente(cedula).isEmpty()) {
+                    egresosInternoRepository.saveAll(mockEgresosInternos(cedula, nombre, random));
                 }
-            } catch (Exception e) {
-                log.error("Error accediendo a egresos internos: {}", e.getMessage(), e);
-                throw e;
             }
+            log.info("Sincronización terminada. Total creados: {}", creados);
 
-            // 3. Buscar y/o poblar ingresos y egresos externos
-            List<IngresosExterno> ingresosExternos;
-            try {
-                ingresosExternos = ingresosExternoRepository.findAllByCedulaCliente(cedula);
-                if (ingresosExternos.isEmpty()) {
-                    log.info("No existen ingresos externos para {}, generando mock y guardando...", cedula);
-                    ingresosExternos = mockIngresosExternos(cedula, cliente.getNombre());
-                    ingresosExternos = ingresosExternoRepository.saveAll(ingresosExternos);
-                }
-            } catch (Exception e) {
-                log.error("Error accediendo a ingresos externos: {}", e.getMessage(), e);
-                throw e;
-            }
-
-            List<EgresosExterno> egresosExternos;
-            try {
-                egresosExternos = egresosExternoRepository.findAllByCedulaCliente(cedula);
-                if (egresosExternos.isEmpty()) {
-                    log.info("No existen egresos externos para {}, generando mock y guardando...", cedula);
-                    egresosExternos = mockEgresosExternos(cedula, cliente.getNombre());
-                    egresosExternos = egresosExternoRepository.saveAll(egresosExternos);
-                }
-            } catch (Exception e) {
-                log.error("Error accediendo a egresos externos: {}", e.getMessage(), e);
-                throw e;
-            }
-
-            // 4. Mapear a DTOs y armar la respuesta final
-            log.info("Consulta de buró exitosa para {}", cedula);
-            return ConsultaBuroCreditoResponse.builder()
-                    .nombreCliente(cliente.getNombre())
-                    .cedulaCliente(cliente.getNumeroIdentificacion())
-                    .ingresosInternos(ingresosInternoMapper.toDtoList(ingresosInternos))
-                    .egresosInternos(egresosInternoMapper.toDtoList(egresosInternos))
-                    .ingresosExternos(ingresosExternoMapper.toDtoList(ingresosExternos))
-                    .egresosExternos(egresosExternoMapper.toDtoList(egresosExternos))
-                    .build();
-
-        } catch (ClienteNoEncontradoException e) {
-            log.error("ClienteNoEncontradoException: {}", e.getMessage());
-            throw e;
         } catch (Exception ex) {
-            log.error("Error inesperado en consulta de buró de crédito para cédula {}: {}", cedula, ex.getMessage(), ex);
-            throw ex; // Se puede personalizar o envolver en excepción propia si lo deseas
+            log.error("Error durante la sincronización masiva del buró interno: {}", ex.getMessage(), ex);
+            throw ex;
         }
+        return creados;
     }
 
-    // ---------- MOCK GENERATORS -----------
-
-    private List<IngresosInterno> mockIngresosInternos(String cedula, String nombre) {
-        Random random = new Random();
+    private List<IngresosInterno> mockIngresosInternos(String cedula, String nombre, Random random) {
         List<IngresosInterno> ingresos = new ArrayList<>();
-        for (int i = 0; i < 2; i++) {
-            IngresosInterno ingreso = new IngresosInterno();
-            ingreso.setCedulaCliente(cedula);
-            ingreso.setNombres(nombre);
-            ingreso.setInstitucionBancaria("BANCO BANQUITO");
-            ingreso.setProducto("CUENTA DE AHORRO");
-            ingreso.setSaldoPromedioMes(BigDecimal.valueOf(500 + random.nextInt(1500)));
-            ingreso.setNumeroCuenta("100" + random.nextInt(9999999));
-            ingreso.setFechaActualizacion(java.time.LocalDate.now());
-            ingreso.setFechaRegistro(java.time.LocalDate.now().minusDays(random.nextInt(100)));
-            ingreso.setVersion(1L);
-            ingresos.add(ingreso);
-        }
+        IngresosInterno ingreso = new IngresosInterno();
+        ingreso.setCedulaCliente(cedula);
+        ingreso.setNombres(nombre);
+        ingreso.setInstitucionBancaria("BANCO BANQUITO");
+        ingreso.setProducto("CUENTA DE AHORRO");
+        ingreso.setSaldoPromedioMes(BigDecimal.valueOf(800 + random.nextInt(2000)));
+        ingreso.setNumeroCuenta("100" + random.nextInt(9999999));
+        ingreso.setFechaActualizacion(java.time.LocalDate.now());
+        ingreso.setFechaRegistro(java.time.LocalDate.now().minusDays(random.nextInt(14)));
+        ingreso.setVersion(1L);
+        ingresos.add(ingreso);
         return ingresos;
     }
 
-    private List<IngresosExterno> mockIngresosExternos(String cedula, String nombre) {
-        Random random = new Random();
-        List<IngresosExterno> ingresos = new ArrayList<>();
-        for (int i = 0; i < 2; i++) {
-            IngresosExterno ingreso = new IngresosExterno();
-            ingreso.setCedulaCliente(cedula);
-            ingreso.setNombres(nombre);
-            ingreso.setInstitucionBancaria("BANCO DEL PACIFICO");
-            ingreso.setProducto("CUENTA DE AHORRO");
-            ingreso.setSaldoPromedioMes(BigDecimal.valueOf(1000 + random.nextInt(3000)));
-            ingreso.setNumeroCuenta("200" + random.nextInt(9999999));
-            ingreso.setFechaActualizacion(java.time.LocalDate.now());
-            ingreso.setFechaRegistro(java.time.LocalDate.now().minusDays(random.nextInt(200)));
-            ingreso.setVersion(1L);
-            ingresos.add(ingreso);
-        }
-        return ingresos;
-    }
-
-    private List<EgresosInterno> mockEgresosInternos(String cedula, String nombre) {
-        Random random = new Random();
+    private List<EgresosInterno> mockEgresosInternos(String cedula, String nombre, Random random) {
         List<EgresosInterno> egresos = new ArrayList<>();
-        for (int i = 0; i < 2; i++) {
-            EgresosInterno egreso = new EgresosInterno();
-            egreso.setCedulaCliente(cedula);
-            egreso.setNombres(nombre);
-            egreso.setInstitucionBancaria("BANCO BANQUITO");
-            egreso.setProducto(ProductoInternoEnum.PRESTAMO);
-            egreso.setSaldoPendiente(BigDecimal.valueOf(1000 + random.nextInt(4000)));
-            egreso.setMesesPendientes(random.nextInt(36) + 1);
-            egreso.setCuotaPago(BigDecimal.valueOf(50 + random.nextInt(450)));
-            egreso.setMora(MoraEnum.NO);
-            egreso.setMoraUltimosTresMeses(MoraTresMesesEnum.NO);
-            egreso.setFechaActualizacion(java.time.LocalDate.now());
-            egreso.setFechaRegistro(java.time.LocalDate.now().minusDays(random.nextInt(100)));
-            egreso.setVersion(1L);
-            egresos.add(egreso);
+        int tipoProducto = random.nextInt(3);
+
+        // Tarjeta de crédito (máximo una)
+        if (tipoProducto == 0 || tipoProducto == 2) {
+            EgresosInterno tarjeta = new EgresosInterno();
+            tarjeta.setCedulaCliente(cedula);
+            tarjeta.setNombres(nombre);
+            tarjeta.setInstitucionBancaria("BANCO BANQUITO");
+            tarjeta.setProducto(ProductoInternoEnum.TARJETA_DE_CREDITO);
+            tarjeta.setSaldoPendiente(BigDecimal.valueOf(300 + random.nextInt(3700)));
+            int mesesTarjeta = random.nextBoolean() ? 0 : (1 + random.nextInt(36)); // 0 o mayor
+            tarjeta.setMesesPendientes(mesesTarjeta);
+            tarjeta.setCuotaPago(BigDecimal.valueOf(20 + random.nextInt(80)));
+            tarjeta.setMora(mesesTarjeta == 0 ? MoraEnum.NO : MoraEnum.SI);
+            tarjeta.setMoraUltimosTresMeses(random.nextBoolean() ? MoraTresMesesEnum.SI : MoraTresMesesEnum.NO);
+            tarjeta.setFechaActualizacion(java.time.LocalDate.now());
+            tarjeta.setFechaRegistro(java.time.LocalDate.now().minusDays(random.nextInt(14)));
+            tarjeta.setVersion(1L);
+            egresos.add(tarjeta);
+        }
+
+        // Préstamo vehicular (máximo uno)
+        if (tipoProducto == 1 || tipoProducto == 2) {
+            EgresosInterno prestamo = new EgresosInterno();
+            prestamo.setCedulaCliente(cedula);
+            prestamo.setNombres(nombre);
+            prestamo.setInstitucionBancaria("BANCO BANQUITO");
+            prestamo.setProducto(ProductoInternoEnum.PRESTAMO);
+            int mesesPrestamo = random.nextBoolean() ? 0 : (12 + random.nextInt(36));
+            prestamo.setMesesPendientes(mesesPrestamo);
+            prestamo.setSaldoPendiente(BigDecimal.valueOf(2000 + random.nextInt(6000)));
+            prestamo.setCuotaPago(BigDecimal.valueOf(100 + random.nextInt(500)));
+            prestamo.setMora(mesesPrestamo == 0 ? MoraEnum.NO : MoraEnum.SI);
+            prestamo.setMoraUltimosTresMeses(random.nextBoolean() ? MoraTresMesesEnum.SI : MoraTresMesesEnum.NO);
+            prestamo.setFechaActualizacion(java.time.LocalDate.now());
+            prestamo.setFechaRegistro(java.time.LocalDate.now().minusDays(random.nextInt(14)));
+            prestamo.setVersion(1L);
+            egresos.add(prestamo);
         }
         return egresos;
     }
 
-    private List<EgresosExterno> mockEgresosExternos(String cedula, String nombre) {
-        Random random = new Random();
-        List<EgresosExterno> egresos = new ArrayList<>();
-        for (int i = 0; i < 2; i++) {
-            EgresosExterno egreso = new EgresosExterno();
-            egreso.setCedulaCliente(cedula);
-            egreso.setNombres(nombre);
-            egreso.setInstitucionBancaria("BANCO PICHINCHA");
-            egreso.setProducto(ProductoExternoEnum.PRESTAMO);
-            egreso.setSaldoPendiente(BigDecimal.valueOf(2000 + random.nextInt(6000)));
-            egreso.setMesesPendientes(random.nextInt(48) + 1);
-            egreso.setCuotaPago(BigDecimal.valueOf(100 + random.nextInt(600)));
-            egreso.setMora(MoraEnum.NO);
-            egreso.setMoraUltimosTresMeses(MoraTresMesesEnum.NO);
-            egreso.setFechaActualizacion(java.time.LocalDate.now());
-            egreso.setFechaRegistro(java.time.LocalDate.now().minusDays(random.nextInt(200)));
-            egreso.setVersion(1L);
-            egresos.add(egreso);
+    @Transactional(readOnly = true)
+    public int contarPersonasEnCore() {
+        try {
+            List<ClienteDto> personas = clienteBuroClient.listarPorTipoEntidad("PERSONA");
+            int total = personas.size();
+            log.info("Total de clientes PERSONA en el core: {}", total);
+            return total;
+        } catch (Exception ex) {
+            log.error("Error al contar personas en el core: {}", ex.getMessage(), ex);
+            throw ex;
         }
-        return egresos;
     }
 }
