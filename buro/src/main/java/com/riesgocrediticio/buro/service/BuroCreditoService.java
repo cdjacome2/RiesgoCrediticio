@@ -84,9 +84,10 @@ public class BuroCreditoService {
     }
 
     @Transactional
-    public int sincronizarClientesDesdeCore() {
+    public String sincronizarClientesDesdeCore() {
         log.info("Iniciando sincronización masiva de clientes PERSONA desde el core...");
         int creados = 0;
+        int yaExistentes = 0;
         Random random = new Random();
 
         try {
@@ -96,22 +97,33 @@ public class BuroCreditoService {
                 String cedula = cliente.getNumeroIdentificacion();
                 String nombre = cliente.getNombre();
 
-                if (ingresosInternoRepository.findAllByCedulaCliente(cedula).isEmpty()) {
+                boolean existeIngreso = !ingresosInternoRepository.findAllByCedulaCliente(cedula).isEmpty();
+                boolean existeEgreso = !egresosInternoRepository.findAllByCedulaCliente(cedula).isEmpty();
+
+                if (!existeIngreso) {
                     ingresosInternoRepository.saveAll(mockIngresosInternos(cedula, nombre, random));
                     creados++;
+                } else {
+                    yaExistentes++;
                 }
-                if (egresosInternoRepository.findAllByCedulaCliente(cedula).isEmpty()) {
+
+                if (!existeEgreso) {
                     egresosInternoRepository.saveAll(mockEgresosInternos(cedula, nombre, random));
                 }
             }
-            log.info("Sincronización terminada. Total creados: {}", creados);
+            String mensaje = String.format(
+                "Sincronización completada. Se crearon %d clientes nuevos en el buró interno. %d clientes ya estaban registrados.",
+                creados, yaExistentes
+            );
+            log.info(mensaje);
+            return mensaje;
 
         } catch (Exception ex) {
             log.error("Error durante la sincronización masiva del buró interno: {}", ex.getMessage(), ex);
             throw ex;
         }
-        return creados;
     }
+
 
     private List<IngresosInterno> mockIngresosInternos(String cedula, String nombre, Random random) {
         List<IngresosInterno> ingresos = new ArrayList<>();

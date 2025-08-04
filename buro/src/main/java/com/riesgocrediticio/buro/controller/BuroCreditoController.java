@@ -45,23 +45,13 @@ public class BuroCreditoController {
     })
     @GetMapping("/consulta-por-cedula/{cedula}")
     public ResponseEntity<ConsultaBuroCreditoResponse> consultarPorCedula(
-        @Parameter(description = "Cédula del cliente a consultar", example = "0102030405", required = true)
+        @Parameter(description = "Cédula del cliente a consultar", required = true)
         @PathVariable @NotBlank String cedula) {
 
         log.debug("Solicitud recibida → Consulta de buró por cédula={}", cedula);
-        try {
-            ConsultaBuroCreditoResponse response = buroCreditoService.consultarPorCedula(cedula);
-            log.info("Consulta de buró crediticio exitosa para cédula={}", cedula);
-            return ResponseEntity.ok(response);
-
-        } catch (ClienteNoEncontradoException ex) {
-            log.warn("Cliente no encontrado en core para cédula={}: {}", cedula, ex.getMessage());
-            return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
-
-        } catch (Exception ex) {
-            log.error("Error inesperado en la consulta de buró para cédula={}: {}", cedula, ex.getMessage(), ex);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
-        }
+        ConsultaBuroCreditoResponse response = buroCreditoService.consultarPorCedula(cedula);
+        log.info("Consulta de buró crediticio exitosa para cédula={}", cedula);
+        return ResponseEntity.ok(response);
     }
     
     @Operation(
@@ -73,11 +63,11 @@ public class BuroCreditoController {
             content = @Content(schema = @Schema(implementation = String.class))),
         @ApiResponse(responseCode = "500", description = "Error interno")
     })
+    
     @PostMapping("/sincronizar-core")
     public ResponseEntity<String> sincronizarDesdeCore() {
         log.info("Solicitud recibida → Sincronización masiva desde el core");
-        int creados = buroCreditoService.sincronizarClientesDesdeCore();
-        String mensaje = "Se guardaron " + creados + " clientes del buró interno";
+        String mensaje = buroCreditoService.sincronizarClientesDesdeCore();
         log.info("Sincronización finalizada: {}", mensaje);
         return ResponseEntity.ok(mensaje);
     }

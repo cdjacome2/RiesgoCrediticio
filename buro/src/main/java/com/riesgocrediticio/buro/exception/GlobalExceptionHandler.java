@@ -12,11 +12,10 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 public class GlobalExceptionHandler {
 
     @ExceptionHandler(ClienteNoEncontradoException.class)
-    public ResponseEntity<Map<String, Object>> handleClienteNoEncontradoException(ClienteNoEncontradoException ex) {
-        Map<String, Object> response = new HashMap<>();
-        response.put("mensaje", ex.getMessage());
-        response.put("codigo", ex.getErrorCode());
-        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(response);
+    public ResponseEntity<Map<String, String>> handleClienteNoEncontradoException(ClienteNoEncontradoException ex) {
+        Map<String, String> body = new HashMap<>();
+        body.put("mensaje", ex.getMessage());
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(body);
     }
 
     @ExceptionHandler(Exception.class)
