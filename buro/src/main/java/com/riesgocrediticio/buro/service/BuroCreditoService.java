@@ -94,10 +94,13 @@ public class BuroCreditoService {
                 throw new ClienteNoEncontradoException("El cliente no está registrado en el buro interno ni externo.");
             }
 
-            // Si hay información en el buró interno, retorna solo la del interno (si hay que comparar igualdad puedes adaptar aquí)
             if (hayInterno) {
                 String nombre = ingresosInternos.stream().findFirst().map(IngresosInterno::getNombres)
                     .orElse(egresosInternos.stream().findFirst().map(EgresosInterno::getNombres).orElse(null));
+
+                String calificacionRiesgo = calcularCalificacionRiesgo(ingresosInternos, egresosInternos);
+                BigDecimal capacidadPago = calcularCapacidadPago(ingresosInternos, egresosInternos);
+
                 log.info("Consulta exitosa de buró interno para cédula={}", cedula);
                 return ConsultaBuroCreditoResponse.builder()
                     .nombreCliente(nombre)
@@ -106,12 +109,19 @@ public class BuroCreditoService {
                     .egresosInternos(egresosInternoMapper.toDtoList(egresosInternos))
                     .ingresosExternos(Collections.emptyList())
                     .egresosExternos(Collections.emptyList())
+                    .calificacionRiesgo(calificacionRiesgo)
+                    .capacidadPago(capacidadPago)
                     .build();
             }
+
 
             // Si no hay en el interno, pero sí en el externo de BANCO BANQUITO
             String nombre = ingresosExternos.stream().findFirst().map(IngresosExterno::getNombres)
                 .orElse(egresosExternos.stream().findFirst().map(EgresosExterno::getNombres).orElse(null));
+            
+            String calificacionRiesgo = calcularCalificacionRiesgo(ingresosExternos, egresosExternos);
+            BigDecimal capacidadPago = calcularCapacidadPago(ingresosExternos, egresosExternos);
+
             log.info("Consulta exitosa de buró externo (BANCO BANQUITO) para cédula={}", cedula);
             return ConsultaBuroCreditoResponse.builder()
                 .nombreCliente(nombre)
@@ -120,6 +130,8 @@ public class BuroCreditoService {
                 .egresosInternos(Collections.emptyList())
                 .ingresosExternos(ingresosExternoMapper.toDtoList(ingresosExternos))
                 .egresosExternos(egresosExternoMapper.toDtoList(egresosExternos))
+                .calificacionRiesgo(calificacionRiesgo)
+                .capacidadPago(capacidadPago)
                 .build();
 
         } catch (ClienteNoEncontradoException ex) {
@@ -384,5 +396,116 @@ public class BuroCreditoService {
         return creados;
     }
 
+    private String calcularCalificacionRiesgo(
+        List<? extends Object> ingresos,
+        List<? extends Object> egresos) {
+
+        BigDecimal totalIngresos = ingresos.stream()
+                .map(i -> {
+                    if (i instanceof IngresosInterno ii) return ii.getSaldoPromedioMes();
+                    if (i instanceof IngresosExterno ie) return ie.getSaldoPromedioMes();
+                    return BigDecimal.ZERO;
+                })
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+        BigDecimal saldoPendiente = egresos.stream()
+                .map(e -> {
+                    if (e instanceof EgresosInterno ei) return ei.getSaldoPendiente();
+                    if (e instanceof EgresosExterno ee) return ee.getSaldoPendiente();
+                    return BigDecimal.ZERO;
+                })
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+        BigDecimal totalCuotas = egresos.stream()
+                .map(e -> {
+                    if (e instanceof EgresosInterno ei) return ei.getCuotaPago();
+                    if (e instanceof EgresosExterno ee) return ee.getCuotaPago();
+                    return BigDecimal.ZERO;
+                })
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+        boolean tieneMora = egresos.stream().anyMatch(e ->
+            (e instanceof EgresosInterno ei && ei.getMora() != null && ei.getMora().toString().equalsIgnoreCase("SI")) ||
+            (e instanceof EgresosExterno ee && ee.getMora() != null && ee.getMora().toString().equalsIgnoreCase("SI"))
+        );
+        boolean moraUltimosTresMeses = egresos.stream().anyMatch(e ->
+            (e instanceof EgresosInterno ei && ei.getMoraUltimosTresMeses() != null && ei.getMoraUltimosTresMeses().toString().equalsIgnoreCase("SI")) ||
+            (e instanceof EgresosExterno ee && ee.getMoraUltimosTresMeses() != null && ee.getMoraUltimosTresMeses().toString().equalsIgnoreCase("SI"))
+        );
+        int mesesPendientes = egresos.stream()
+                .map(e -> {
+                    if (e instanceof EgresosInterno ei) return Optional.ofNullable(ei.getMesesPendientes()).orElse(0);
+                    if (e instanceof EgresosExterno ee) return Optional.ofNullable(ee.getMesesPendientes()).orElse(0);
+                    return 0;
+                })
+                .max(Integer::compareTo)
+                .orElse(0);
+
+        // --- Reglas de la tabla ---
+
+        // A+
+        if (!tieneMora && saldoPendiente.compareTo(BigDecimal.ZERO) == 0 && totalIngresos.compareTo(new BigDecimal("2000")) > 0)
+            return "A+";
+        // A-
+        if (!tieneMora && saldoPendiente.compareTo(BigDecimal.ZERO) == 0 && totalIngresos.compareTo(new BigDecimal("1000")) >= 0 && totalIngresos.compareTo(new BigDecimal("2000")) <= 0)
+            return "A-";
+        // B+
+        if (!tieneMora && saldoPendiente.compareTo(BigDecimal.ZERO) > 0 &&
+                saldoPendiente.compareTo(totalIngresos.multiply(new BigDecimal("0.25"))) < 0)
+            return "B+";
+        // B-
+        if (!tieneMora && saldoPendiente.compareTo(totalIngresos.multiply(new BigDecimal("0.25"))) >= 0 &&
+                saldoPendiente.compareTo(totalIngresos.multiply(new BigDecimal("0.5"))) < 0)
+            return "B-";
+        // C+
+        if (!tieneMora && saldoPendiente.compareTo(totalIngresos.multiply(new BigDecimal("0.5"))) >= 0 &&
+                saldoPendiente.compareTo(totalIngresos) < 0)
+            return "C+";
+        // C-
+        if (!tieneMora && saldoPendiente.compareTo(totalIngresos) >= 0)
+            return "C-";
+        // D+
+        if (tieneMora && mesesPendientes > 0 && totalCuotas.compareTo(totalIngresos) <= 0)
+            return "D+";
+        // D-
+        if (tieneMora && mesesPendientes > 0 && totalCuotas.compareTo(totalIngresos) > 0)
+            return "D-";
+        // E+
+        if (moraUltimosTresMeses && saldoPendiente.compareTo(totalIngresos) > 0)
+            return "E+";
+        // E-
+        if (moraUltimosTresMeses && saldoPendiente.compareTo(totalIngresos.multiply(new BigDecimal("2"))) > 0 && mesesPendientes > 24)
+            return "E-";
+
+        return "S/R"; // Sin Regla encontrada
+    }
+
+    private BigDecimal calcularCapacidadPago(
+        List<? extends Object> ingresos,
+        List<? extends Object> egresos) {
+
+    BigDecimal totalIngresos = ingresos.stream()
+            .map(i -> {
+                if (i instanceof IngresosInterno ii) return ii.getSaldoPromedioMes();
+                if (i instanceof IngresosExterno ie) return ie.getSaldoPromedioMes();
+                return BigDecimal.ZERO;
+            })
+            .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+    BigDecimal totalCuotas = egresos.stream()
+            .map(e -> {
+                if (e instanceof EgresosInterno ei) return ei.getCuotaPago();
+                if (e instanceof EgresosExterno ee) return ee.getCuotaPago();
+                return BigDecimal.ZERO;
+            })
+            .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+    BigDecimal diferencia = totalIngresos.subtract(totalCuotas);
+    if (diferencia.compareTo(BigDecimal.ZERO) < 0) {
+        diferencia = BigDecimal.ZERO;
+    }
+
+        return diferencia.multiply(new BigDecimal("0.3")).setScale(2, BigDecimal.ROUND_HALF_UP);
+    }
 
 }
