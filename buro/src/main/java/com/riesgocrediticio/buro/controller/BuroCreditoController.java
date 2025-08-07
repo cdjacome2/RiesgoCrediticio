@@ -18,7 +18,7 @@ import org.springframework.web.bind.annotation.*;
 
 @Slf4j
 @RestController
-@RequestMapping(path = "/api/v1/buro", produces = "application/json")
+@RequestMapping(path = "/api/v1/riesgo-crediticio", produces = "application/json")
 @Tag(name = "Buró Crediticio", description = "API para consultar información de buró crediticio interno y externo")
 @Validated
 public class BuroCreditoController {
@@ -122,6 +122,18 @@ public class BuroCreditoController {
         String mensaje = "Se generaron " + creados + " clientes externos.";
         log.info("Generación de clientes externos mock finalizada: {}", mensaje);
         return ResponseEntity.ok(mensaje);
+    }
+    @GetMapping("/clientes-internos")
+    public int contarClientesEnBuroInterno() {
+        try {
+            // Llamar al servicio para contar los clientes en el buro interno
+            int totalClientes = buroCreditoService.contarClientesEnBuroInterno();
+            log.info("Total de clientes en buro interno: {}", totalClientes);
+            return totalClientes;
+        } catch (Exception ex) {
+            log.error("Error al contar los clientes en el buro interno: {}", ex.getMessage(), ex);
+            throw new RuntimeException("Error al contar los clientes en el buro interno", ex);
+        }
     }
 
 }

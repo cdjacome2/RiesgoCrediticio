@@ -26,6 +26,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
+//import java.time.LocalDate;
 import java.util.*;
 
 @Slf4j
@@ -114,7 +116,6 @@ public class BuroCreditoService {
                     .build();
             }
 
-
             // Si no hay en el interno, pero sí en el externo de BANCO BANQUITO
             String nombre = ingresosExternos.stream().findFirst().map(IngresosExterno::getNombres)
                 .orElse(egresosExternos.stream().findFirst().map(EgresosExterno::getNombres).orElse(null));
@@ -146,6 +147,13 @@ public class BuroCreditoService {
     @Transactional
     public String sincronizarClientesDesdeCore() {
         log.info("Iniciando sincronización masiva de clientes PERSONA desde el core...");
+        
+        // // Solo si hoy es domingo se ejecuta la sincronización
+        // if (!esUltimoDiaDeLaSemana()) {
+        //     log.info("Hoy no es fin de semana. No se realizará la carga de datos del buró interno.");
+        //     return "Sincronización no realizada. Solo se realiza los fines de semana.";
+        // }
+
         int creados = 0;
         int yaExistentes = 0;
         Random random = new Random();
@@ -160,15 +168,24 @@ public class BuroCreditoService {
                 boolean existeIngreso = !ingresosInternoRepository.findAllByCedulaCliente(cedula).isEmpty();
                 boolean existeEgreso = !egresosInternoRepository.findAllByCedulaCliente(cedula).isEmpty();
 
-                if (!existeIngreso) {
-                    ingresosInternoRepository.saveAll(mockIngresosInternos(cedula, nombre, random));
+                // *** SOLO CREA ingresos Y egresos SI EL CLIENTE ES NUEVO ***
+                if (!existeIngreso && !existeEgreso) {
+                    // Crear ingresos
+                    List<IngresosInterno> ingresos = mockIngresosInternos(cedula, nombre, random);
+                    ingresosInternoRepository.saveAll(ingresos);
+
+                    // Sumar total de ingresos
+                    BigDecimal totalIngresos = ingresos.stream()
+                            .map(IngresosInterno::getSaldoPromedioMes)
+                            .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+                    // Crear egresos (UNA SOLA VEZ)
+                    List<EgresosInterno> egresos = mockEgresosInternos(cedula, nombre, random, totalIngresos);
+                    egresosInternoRepository.saveAll(egresos);
+
                     creados++;
                 } else {
                     yaExistentes++;
-                }
-
-                if (!existeEgreso) {
-                    egresosInternoRepository.saveAll(mockEgresosInternos(cedula, nombre, random));
                 }
             }
             String mensaje = String.format(
@@ -184,7 +201,6 @@ public class BuroCreditoService {
         }
     }
 
-
     private List<IngresosInterno> mockIngresosInternos(String cedula, String nombre, Random random) {
         List<IngresosInterno> ingresos = new ArrayList<>();
         IngresosInterno ingreso = new IngresosInterno();
@@ -192,8 +208,8 @@ public class BuroCreditoService {
         ingreso.setNombres(nombre);
         ingreso.setInstitucionBancaria("BANCO BANQUITO");
         ingreso.setProducto("CUENTA DE AHORRO");
-        ingreso.setSaldoPromedioMes(BigDecimal.valueOf(800 + random.nextInt(2000)));
-        ingreso.setNumeroCuenta("100" + random.nextInt(9999999));
+        ingreso.setSaldoPromedioMes(BigDecimal.valueOf(200 + random.nextInt(2800)));
+        ingreso.setNumeroCuenta("100" + (random.nextInt(9000000) + 1000000));
         ingreso.setFechaActualizacion(java.time.LocalDate.now());
         ingreso.setFechaRegistro(java.time.LocalDate.now().minusDays(random.nextInt(14)));
         ingreso.setVersion(1L);
@@ -201,21 +217,40 @@ public class BuroCreditoService {
         return ingresos;
     }
 
-    private List<EgresosInterno> mockEgresosInternos(String cedula, String nombre, Random random) {
+    private List<EgresosInterno> mockEgresosInternos(String cedula, String nombre, Random random, BigDecimal totalIngresos) {
         List<EgresosInterno> egresos = new ArrayList<>();
-        int tipoProducto = random.nextInt(3);
+        BigDecimal sumaCuotas = BigDecimal.ZERO;
 
         // Tarjeta de crédito (máximo una)
-        if (tipoProducto == 0 || tipoProducto == 2) {
+        boolean tieneTarjeta = true; 
+        if (tieneTarjeta) {
             EgresosInterno tarjeta = new EgresosInterno();
             tarjeta.setCedulaCliente(cedula);
             tarjeta.setNombres(nombre);
             tarjeta.setInstitucionBancaria("BANCO BANQUITO");
             tarjeta.setProducto(ProductoInternoEnum.TARJETA_DE_CREDITO);
-            tarjeta.setSaldoPendiente(BigDecimal.valueOf(300 + random.nextInt(3700)));
-            int mesesTarjeta = random.nextBoolean() ? 0 : (1 + random.nextInt(36)); // 0 o mayor
+
+            int mesesTarjeta = random.nextBoolean() ? 0 : (1 + random.nextInt(36));
+            BigDecimal cuotaTarjeta = BigDecimal.ZERO;
+            BigDecimal saldoTarjeta = BigDecimal.ZERO;
+
+            if (mesesTarjeta > 0) {
+                cuotaTarjeta = BigDecimal.valueOf(20 + random.nextInt(101)); // $20-$120
+                saldoTarjeta = cuotaTarjeta.multiply(BigDecimal.valueOf(mesesTarjeta)).setScale(2, RoundingMode.HALF_UP);
+            }
+
+            // Validación para que no supere el ingreso
+            if (sumaCuotas.add(cuotaTarjeta).compareTo(totalIngresos) <= 0) {
+                tarjeta.setCuotaPago(cuotaTarjeta);
+                sumaCuotas = sumaCuotas.add(cuotaTarjeta);
+            } else {
+                tarjeta.setCuotaPago(BigDecimal.ZERO);
+                saldoTarjeta = BigDecimal.ZERO;
+                mesesTarjeta = 0;
+            }
+
+            tarjeta.setSaldoPendiente(saldoTarjeta);
             tarjeta.setMesesPendientes(mesesTarjeta);
-            tarjeta.setCuotaPago(BigDecimal.valueOf(20 + random.nextInt(80)));
             tarjeta.setMora(mesesTarjeta == 0 ? MoraEnum.NO : MoraEnum.SI);
             tarjeta.setMoraUltimosTresMeses(random.nextBoolean() ? MoraTresMesesEnum.SI : MoraTresMesesEnum.NO);
             tarjeta.setFechaActualizacion(java.time.LocalDate.now());
@@ -224,17 +259,35 @@ public class BuroCreditoService {
             egresos.add(tarjeta);
         }
 
-        // Préstamo vehicular (máximo uno)
-        if (tipoProducto == 1 || tipoProducto == 2) {
+        // Préstamo (máximo uno)
+        boolean tienePrestamo = true; // O random.nextBoolean()
+        if (tienePrestamo) {
             EgresosInterno prestamo = new EgresosInterno();
             prestamo.setCedulaCliente(cedula);
             prestamo.setNombres(nombre);
             prestamo.setInstitucionBancaria("BANCO BANQUITO");
             prestamo.setProducto(ProductoInternoEnum.PRESTAMO);
+
             int mesesPrestamo = random.nextBoolean() ? 0 : (12 + random.nextInt(36));
+            BigDecimal cuotaPrestamo = BigDecimal.ZERO;
+            BigDecimal saldoPrestamo = BigDecimal.ZERO;
+
+            if (mesesPrestamo > 0) {
+                cuotaPrestamo = BigDecimal.valueOf(100 + random.nextInt(401)); // $100-$500
+                saldoPrestamo = cuotaPrestamo.multiply(BigDecimal.valueOf(mesesPrestamo)).setScale(2, RoundingMode.HALF_UP);
+            }
+
+            if (sumaCuotas.add(cuotaPrestamo).compareTo(totalIngresos) <= 0) {
+                prestamo.setCuotaPago(cuotaPrestamo);
+                sumaCuotas = sumaCuotas.add(cuotaPrestamo);
+            } else {
+                prestamo.setCuotaPago(BigDecimal.ZERO);
+                saldoPrestamo = BigDecimal.ZERO;
+                mesesPrestamo = 0;
+            }
+
+            prestamo.setSaldoPendiente(saldoPrestamo);
             prestamo.setMesesPendientes(mesesPrestamo);
-            prestamo.setSaldoPendiente(BigDecimal.valueOf(2000 + random.nextInt(6000)));
-            prestamo.setCuotaPago(BigDecimal.valueOf(100 + random.nextInt(500)));
             prestamo.setMora(mesesPrestamo == 0 ? MoraEnum.NO : MoraEnum.SI);
             prestamo.setMoraUltimosTresMeses(random.nextBoolean() ? MoraTresMesesEnum.SI : MoraTresMesesEnum.NO);
             prestamo.setFechaActualizacion(java.time.LocalDate.now());
@@ -242,6 +295,7 @@ public class BuroCreditoService {
             prestamo.setVersion(1L);
             egresos.add(prestamo);
         }
+
         return egresos;
     }
 
@@ -258,12 +312,35 @@ public class BuroCreditoService {
         }
     }
 
+    @Transactional(readOnly = true)
+    public int contarClientesEnBuroInterno() {
+        try {
+            log.info("Contando clientes en el buro interno...");
+            long totalClientes = ingresosInternoRepository.findAll()
+                .stream()
+                .map(i -> i.getCedulaCliente())
+                .distinct()
+                .count();
+            log.info("Total de clientes en el buro interno: {}", totalClientes);
+            return (int) totalClientes; // Convertir a entero, si es necesario.
+        } catch (Exception ex) {
+            log.error("Error al contar clientes en el buro interno: {}", ex.getMessage(), ex);
+            throw ex;
+        }
+    }
+
     // METODOS PARA EL BURO EXTERNO
     @Transactional
     public String sincronizarClientesDesdeInternoAExterno() {
         log.info("Iniciando sincronización del buró interno al externo...");
+        
+        // // Solo si hoy es el último día del mes se ejecuta la sincronización
+        // if (!esUltimoDiaDelMes()) {
+        //     log.info("Hoy no es el último día del mes. No se realizará la carga de datos del buró externo.");
+        //     return "Sincronización no realizada. Solo se realiza el último día del mes.";
+        // }
+
         int creados = 0;
-        int actualizados = 0;
 
         List<IngresosInterno> todosIngresos = ingresosInternoRepository.findAll();
         List<EgresosInterno> todosEgresos = egresosInternoRepository.findAll();
@@ -278,7 +355,7 @@ public class BuroCreditoService {
             boolean existeIngresoExterno = !ingresosExternoRepository.findAllByCedulaCliente(cedula).isEmpty();
             boolean existeEgresoExterno = !egresosExternoRepository.findAllByCedulaCliente(cedula).isEmpty();
 
-            // Solo crea si no existe; podrías actualizar si quieres mantener la info fresca cada mes
+            // Solo crea si no existe
             if (!existeIngresoExterno) {
                 IngresosExterno ingresoExt = new IngresosExterno();
                 ingresoExt.setCedulaCliente(cedula);
@@ -292,9 +369,6 @@ public class BuroCreditoService {
                 ingresoExt.setVersion(1L);
                 ingresosExternoRepository.save(ingresoExt);
                 creados++;
-            } else {
-                actualizados++;
-                // aquí podrías actualizar datos si lo deseas
             }
             cedulasSincronizadas.add(cedula);
         }
@@ -336,7 +410,7 @@ public class BuroCreditoService {
     }
         String mensaje = String.format(
             "Sincronización buró externo completada. Se crearon %d registros nuevos. %d ya existían y fueron ignorados.",
-            creados, actualizados
+            creados
         );
         log.info(mensaje);
         return mensaje;
@@ -348,46 +422,137 @@ public class BuroCreditoService {
         int creados = 0;
         Random random = new Random();
 
+        // Arrays de nombres y apellidos realistas
+        String[] nombres = {"Juan", "Elena", "Sofía", "Carlos", "María", "Sam", "José", "Ana", "Lucía", "Pedro", "Daniela", "Andrea", "David", "Cristina", "Mónica"};
+        String[] apellidos = {"Ramírez", "Smith", "Ponce", "García", "Vera", "Torres", "Morales", "Mendoza", "Gómez", "López", "Martínez", "Díaz", "Castillo", "Jiménez", "Rojas"};
+
         // Cedulas ya existentes
         Set<String> cedulasOcupadas = new HashSet<>();
         cedulasOcupadas.addAll(ingresosInternoRepository.findAll().stream().map(IngresosInterno::getCedulaCliente).toList());
         cedulasOcupadas.addAll(ingresosExternoRepository.findAll().stream().map(IngresosExterno::getCedulaCliente).toList());
 
+        String[] bancosFicticios = {
+            "BANCO FICTICIO 1",
+            "BANCO FICTICIO 2",
+            "BANCO FICTICIO 3",
+            "BANCO FICTICIO 4",
+            "BANCO FICTICIO 5"
+        };
+
         while (creados < cantidad) {
             String cedulaRandom = String.valueOf(1000000000L + Math.abs(random.nextLong() % 8999999999L)); // 10 dígitos
             if (cedulasOcupadas.contains(cedulaRandom)) continue;
 
-            // Nombre ficticio
-            String nombre = "Cliente Externo " + (creados + 1);
+            // Genera un nombre realista
+            String nombre = nombres[random.nextInt(nombres.length)] + " " + apellidos[random.nextInt(apellidos.length)];
 
-            // Mock ingresos y egresos (puedes adaptar tu lógica de mock aquí)
-            IngresosExterno ingreso = new IngresosExterno();
-            ingreso.setCedulaCliente(cedulaRandom);
-            ingreso.setNombres(nombre);
-            ingreso.setInstitucionBancaria("BANCO FICTICIO " + ((creados % 5) + 1));
-            ingreso.setProducto("CUENTA DE AHORRO");
-            ingreso.setSaldoPromedioMes(BigDecimal.valueOf(800 + random.nextInt(2000)));
-            ingreso.setNumeroCuenta("200" + random.nextInt(9999999));
-            ingreso.setFechaActualizacion(java.time.LocalDate.now());
-            ingreso.setFechaRegistro(java.time.LocalDate.now().minusDays(random.nextInt(14)));
-            ingreso.setVersion(1L);
-            ingresosExternoRepository.save(ingreso);
+            // Cada cliente puede tener cuentas/egresos en 2 o 3 bancos ficticios diferentes
+            List<String> bancosCliente = new ArrayList<>(Arrays.asList(bancosFicticios));
+            Collections.shuffle(bancosCliente, random);
+            int bancosMax = 2 + random.nextInt(2); // 2 o 3 bancos
 
-            EgresosExterno egreso = new EgresosExterno();
-            egreso.setCedulaCliente(cedulaRandom);
-            egreso.setNombres(nombre);
-            egreso.setInstitucionBancaria(ingreso.getInstitucionBancaria());
-            egreso.setProducto(ProductoExternoEnum.PRESTAMO);
-            int mesesPrestamo = random.nextBoolean() ? 0 : (12 + random.nextInt(36));
-            egreso.setMesesPendientes(mesesPrestamo);
-            egreso.setSaldoPendiente(BigDecimal.valueOf(2000 + random.nextInt(6000)));
-            egreso.setCuotaPago(BigDecimal.valueOf(100 + random.nextInt(500)));
-            egreso.setMora(mesesPrestamo == 0 ? MoraEnum.NO : MoraEnum.SI);
-            egreso.setMoraUltimosTresMeses(random.nextBoolean() ? MoraTresMesesEnum.SI : MoraTresMesesEnum.NO);
-            egreso.setFechaActualizacion(java.time.LocalDate.now());
-            egreso.setFechaRegistro(java.time.LocalDate.now().minusDays(random.nextInt(14)));
-            egreso.setVersion(1L);
-            egresosExternoRepository.save(egreso);
+            for (int b = 0; b < bancosMax; b++) {
+                String banco = bancosCliente.get(b);
+
+                // --- INGRESOS (solo una cuenta por banco) ---
+                IngresosExterno ingreso = new IngresosExterno();
+                ingreso.setCedulaCliente(cedulaRandom);
+                ingreso.setNombres(nombre);
+                ingreso.setInstitucionBancaria(banco);
+                ingreso.setProducto("CUENTA DE AHORRO");
+                ingreso.setSaldoPromedioMes(BigDecimal.valueOf(200 + random.nextInt(2800)));
+                ingreso.setNumeroCuenta("200" + (random.nextInt(9000000) + 1000000));
+                ingreso.setFechaActualizacion(java.time.LocalDate.now());
+                ingreso.setFechaRegistro(java.time.LocalDate.now().minusDays(random.nextInt(14)));
+                ingreso.setVersion(1L);
+                ingresosExternoRepository.save(ingreso);
+
+                BigDecimal totalIngresos = ingreso.getSaldoPromedioMes();
+
+                // --- EGRESOS ---
+                List<EgresosExterno> egresos = new ArrayList<>();
+                int tipoProducto = random.nextInt(3);
+                BigDecimal sumaCuotas = BigDecimal.ZERO;
+
+                // Tarjeta de crédito (solo una por banco)
+                if (tipoProducto == 0 || tipoProducto == 2) {
+                    EgresosExterno tarjeta = new EgresosExterno();
+                    tarjeta.setCedulaCliente(cedulaRandom);
+                    tarjeta.setNombres(nombre);
+                    tarjeta.setInstitucionBancaria(banco);
+                    tarjeta.setProducto(ProductoExternoEnum.TARJETA_DE_CREDITO);
+
+                    BigDecimal saldoTarjeta = BigDecimal.valueOf(300 + random.nextInt(3700));
+                    int mesesTarjeta = random.nextBoolean() ? 0 : (1 + random.nextInt(36));
+                    tarjeta.setSaldoPendiente(mesesTarjeta > 0 ? saldoTarjeta : BigDecimal.ZERO);
+                    tarjeta.setMesesPendientes(mesesTarjeta);
+
+                    BigDecimal cuotaTarjeta = BigDecimal.ZERO;
+                    if (mesesTarjeta > 0 && saldoTarjeta.compareTo(BigDecimal.ZERO) > 0) {
+                        BigDecimal cuotaMin = saldoTarjeta.multiply(new BigDecimal("0.03"));
+                        BigDecimal cuotaMax = saldoTarjeta.multiply(new BigDecimal("0.10"));
+                        cuotaTarjeta = cuotaMin.add(
+                            new BigDecimal(Math.random()).multiply(cuotaMax.subtract(cuotaMin))
+                        ).setScale(2, RoundingMode.HALF_UP);
+                    }
+
+                    if (sumaCuotas.add(cuotaTarjeta).compareTo(totalIngresos) <= 0) {
+                        tarjeta.setCuotaPago(cuotaTarjeta);
+                        sumaCuotas = sumaCuotas.add(cuotaTarjeta);
+                    } else {
+                        tarjeta.setCuotaPago(BigDecimal.ZERO);
+                    }
+
+                    tarjeta.setMora(mesesTarjeta == 0 ? MoraEnum.NO : MoraEnum.SI);
+                    tarjeta.setMoraUltimosTresMeses(random.nextBoolean() ? MoraTresMesesEnum.SI : MoraTresMesesEnum.NO);
+                    tarjeta.setFechaActualizacion(java.time.LocalDate.now());
+                    tarjeta.setFechaRegistro(java.time.LocalDate.now().minusDays(random.nextInt(14)));
+                    tarjeta.setVersion(1L);
+                    egresos.add(tarjeta);
+                }
+
+                // Préstamo (solo uno por banco)
+                if (tipoProducto == 1 || tipoProducto == 2) {
+                    EgresosExterno prestamo = new EgresosExterno();
+                    prestamo.setCedulaCliente(cedulaRandom);
+                    prestamo.setNombres(nombre);
+                    prestamo.setInstitucionBancaria(banco);
+                    prestamo.setProducto(ProductoExternoEnum.PRESTAMO);
+
+                    int mesesPrestamo = random.nextBoolean() ? 0 : (12 + random.nextInt(36));
+                    BigDecimal saldoPrestamo = mesesPrestamo > 0
+                            ? BigDecimal.valueOf(2000 + random.nextInt(6000))
+                            : BigDecimal.ZERO;
+
+                    prestamo.setMesesPendientes(mesesPrestamo);
+                    prestamo.setSaldoPendiente(saldoPrestamo);
+
+                    BigDecimal cuotaPrestamo = BigDecimal.ZERO;
+                    if (mesesPrestamo > 0 && saldoPrestamo.compareTo(BigDecimal.ZERO) > 0) {
+                        BigDecimal cuotaTeorica = saldoPrestamo.divide(BigDecimal.valueOf(mesesPrestamo), 2, RoundingMode.HALF_UP);
+                        BigDecimal cuotaMin = cuotaTeorica.multiply(new BigDecimal("0.7"));
+                        BigDecimal cuotaMax = cuotaTeorica;
+                        cuotaPrestamo = cuotaMin.add(
+                            new BigDecimal(Math.random()).multiply(cuotaMax.subtract(cuotaMin))
+                        ).setScale(2, RoundingMode.HALF_UP);
+                    }
+
+                    if (sumaCuotas.add(cuotaPrestamo).compareTo(totalIngresos) <= 0) {
+                        prestamo.setCuotaPago(cuotaPrestamo);
+                        sumaCuotas = sumaCuotas.add(cuotaPrestamo);
+                    } else {
+                        prestamo.setCuotaPago(BigDecimal.ZERO);
+                    }
+
+                    prestamo.setMora(mesesPrestamo == 0 ? MoraEnum.NO : MoraEnum.SI);
+                    prestamo.setMoraUltimosTresMeses(random.nextBoolean() ? MoraTresMesesEnum.SI : MoraTresMesesEnum.NO);
+                    prestamo.setFechaActualizacion(java.time.LocalDate.now());
+                    prestamo.setFechaRegistro(java.time.LocalDate.now().minusDays(random.nextInt(14)));
+                    prestamo.setVersion(1L);
+                    egresos.add(prestamo);
+                }
+                egresosExternoRepository.saveAll(egresos);
+            }
 
             cedulasOcupadas.add(cedulaRandom);
             creados++;
@@ -424,14 +589,6 @@ public class BuroCreditoService {
                 })
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
 
-        boolean tieneMora = egresos.stream().anyMatch(e ->
-            (e instanceof EgresosInterno ei && ei.getMora() != null && ei.getMora().toString().equalsIgnoreCase("SI")) ||
-            (e instanceof EgresosExterno ee && ee.getMora() != null && ee.getMora().toString().equalsIgnoreCase("SI"))
-        );
-        boolean moraUltimosTresMeses = egresos.stream().anyMatch(e ->
-            (e instanceof EgresosInterno ei && ei.getMoraUltimosTresMeses() != null && ei.getMoraUltimosTresMeses().toString().equalsIgnoreCase("SI")) ||
-            (e instanceof EgresosExterno ee && ee.getMoraUltimosTresMeses() != null && ee.getMoraUltimosTresMeses().toString().equalsIgnoreCase("SI"))
-        );
         int mesesPendientes = egresos.stream()
                 .map(e -> {
                     if (e instanceof EgresosInterno ei) return Optional.ofNullable(ei.getMesesPendientes()).orElse(0);
@@ -441,43 +598,54 @@ public class BuroCreditoService {
                 .max(Integer::compareTo)
                 .orElse(0);
 
-        // --- Reglas de la tabla ---
+        boolean tieneMora = egresos.stream().anyMatch(e ->
+            (e instanceof EgresosInterno ei && ei.getMora() != null && ei.getMora().toString().equalsIgnoreCase("SI")) ||
+            (e instanceof EgresosExterno ee && ee.getMora() != null && ee.getMora().toString().equalsIgnoreCase("SI"))
+        );
+        boolean moraUltimosTresMeses = egresos.stream().anyMatch(e ->
+            (e instanceof EgresosInterno ei && ei.getMoraUltimosTresMeses() != null && ei.getMoraUltimosTresMeses().toString().equalsIgnoreCase("SI")) ||
+            (e instanceof EgresosExterno ee && ee.getMoraUltimosTresMeses() != null && ee.getMoraUltimosTresMeses().toString().equalsIgnoreCase("SI"))
+        );
 
-        // A+
-        if (!tieneMora && saldoPendiente.compareTo(BigDecimal.ZERO) == 0 && totalIngresos.compareTo(new BigDecimal("2000")) > 0)
-            return "A+";
-        // A-
-        if (!tieneMora && saldoPendiente.compareTo(BigDecimal.ZERO) == 0 && totalIngresos.compareTo(new BigDecimal("1000")) >= 0 && totalIngresos.compareTo(new BigDecimal("2000")) <= 0)
-            return "A-";
-        // B+
+        // ----- REGLA ESPECIAL para clientes sin deudas, ni cuotas, ni mora -----
+        if (!tieneMora && saldoPendiente.compareTo(BigDecimal.ZERO) == 0 &&
+            totalCuotas.compareTo(BigDecimal.ZERO) == 0 && mesesPendientes == 0) {
+
+            if (totalIngresos.compareTo(new BigDecimal("2000")) > 0) return "A+";
+            if (totalIngresos.compareTo(new BigDecimal("1000")) >= 0) return "A-";
+            if (totalIngresos.compareTo(new BigDecimal("400")) >= 0) return "B";
+            if (totalIngresos.compareTo(BigDecimal.ZERO) > 0) return "C";
+            return "C-";
+        }
+
+        if (!tieneMora && saldoPendiente.compareTo(BigDecimal.ZERO) == 0) {
+            if (totalIngresos.compareTo(new BigDecimal("2000")) > 0) return "A+";
+            if (totalIngresos.compareTo(new BigDecimal("1000")) >= 0) return "A-";
+            if (totalIngresos.compareTo(new BigDecimal("400")) >= 0) return "B";
+            if (totalIngresos.compareTo(BigDecimal.ZERO) > 0) return "C";
+            return "C-";
+        }
         if (!tieneMora && saldoPendiente.compareTo(BigDecimal.ZERO) > 0 &&
                 saldoPendiente.compareTo(totalIngresos.multiply(new BigDecimal("0.25"))) < 0)
             return "B+";
-        // B-
         if (!tieneMora && saldoPendiente.compareTo(totalIngresos.multiply(new BigDecimal("0.25"))) >= 0 &&
                 saldoPendiente.compareTo(totalIngresos.multiply(new BigDecimal("0.5"))) < 0)
             return "B-";
-        // C+
         if (!tieneMora && saldoPendiente.compareTo(totalIngresos.multiply(new BigDecimal("0.5"))) >= 0 &&
                 saldoPendiente.compareTo(totalIngresos) < 0)
             return "C+";
-        // C-
         if (!tieneMora && saldoPendiente.compareTo(totalIngresos) >= 0)
             return "C-";
-        // D+
         if (tieneMora && mesesPendientes > 0 && totalCuotas.compareTo(totalIngresos) <= 0)
             return "D+";
-        // D-
         if (tieneMora && mesesPendientes > 0 && totalCuotas.compareTo(totalIngresos) > 0)
             return "D-";
-        // E+
         if (moraUltimosTresMeses && saldoPendiente.compareTo(totalIngresos) > 0)
             return "E+";
-        // E-
         if (moraUltimosTresMeses && saldoPendiente.compareTo(totalIngresos.multiply(new BigDecimal("2"))) > 0 && mesesPendientes > 24)
             return "E-";
 
-        return "S/R"; // Sin Regla encontrada
+        return "C-";
     }
 
     private BigDecimal calcularCapacidadPago(
@@ -508,4 +676,17 @@ public class BuroCreditoService {
         return diferencia.multiply(new BigDecimal("0.3")).setScale(2, BigDecimal.ROUND_HALF_UP);
     }
 
+    // // Lógica para verificar si es el último día de la semana (domingo)
+    // private boolean esUltimoDiaDeLaSemana() {
+    //     LocalDate today = LocalDate.now();
+    //     //return today.getDayOfWeek().toString().equals("SUNDAY");
+    //     return today.getDayOfWeek().toString().equals("WEDNESDAY");
+    // }
+
+    // // Lógica para verificar si hoy es el último día del mes
+    // private boolean esUltimoDiaDelMes() {
+    //     LocalDate today = LocalDate.now();
+    //     //return today.getDayOfMonth() == today.lengthOfMonth();
+    //     return today.getDayOfMonth() == 6;
+    // }
 }
