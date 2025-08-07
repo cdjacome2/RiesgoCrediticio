@@ -341,6 +341,7 @@ public class BuroCreditoService {
         // }
 
         int creados = 0;
+        int yaExistentes = 0;
 
         List<IngresosInterno> todosIngresos = ingresosInternoRepository.findAll();
         List<EgresosInterno> todosEgresos = egresosInternoRepository.findAll();
@@ -410,7 +411,8 @@ public class BuroCreditoService {
     }
         String mensaje = String.format(
             "Sincronización buró externo completada. Se crearon %d registros nuevos. %d ya existían y fueron ignorados.",
-            creados
+            creados,
+            yaExistentes
         );
         log.info(mensaje);
         return mensaje;

@@ -96,7 +96,7 @@ public class BuroCreditoController {
         @ApiResponse(responseCode = "500", description = "Error interno")
     })
     @PostMapping("/sincronizar-interno-externo")
-    public ResponseEntity<String> sincronizarInternoExterno() {
+    public ResponseEntity<String> sincronizarClientesDesdeInternoAExterno() {
         log.info("Solicitud recibida → Sincronización de clientes internos a externos");
         String mensaje = buroCreditoService.sincronizarClientesDesdeInternoAExterno();
         log.info("Sincronización interno-externo finalizada: {}", mensaje);
@@ -123,6 +123,16 @@ public class BuroCreditoController {
         log.info("Generación de clientes externos mock finalizada: {}", mensaje);
         return ResponseEntity.ok(mensaje);
     }
+
+    @Operation(
+        summary = "Cuenta el número de clientes en el buro interno",
+        description = "Retorna el total de registros de clientes existentes en el buro interno."
+    )
+    @ApiResponses({
+        @ApiResponse(responseCode = "200", description = "Conteo exitoso",
+            content = @Content(schema = @Schema(implementation = Integer.class))),
+        @ApiResponse(responseCode = "500", description = "Error interno")
+    })
     @GetMapping("/clientes-internos")
     public int contarClientesEnBuroInterno() {
         try {
